@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cross platform bluetooth pair tookit"""
 import re
+import sys
 import argparse
 import configparser
 import os
@@ -8,20 +9,34 @@ import os.path
 import json
 
 _mac_pattern = re.compile(r'([0-9a-fA-f]{2}:){5}[0-9a-fA-f]{2}')  # 00:af:12:34:56:78
-_win_mac_pattern = re.compile(r'([0-9a-fA-f]{2}){6}')  # 00-af-12-34-56-78
+_win_mac_pattern = re.compile(r'([0-9a-fA-f]{2}){6}')  # 00af12345678
+_win_disp_mac_pattern = re.compile(r'([0-9a-fA-f]{2}-){5}[0-9a-fA-f]{2}')  # 00-af-12-34-56-78
 
 
-def pick_controler(controlers):
-    if len(controlers) == 1:
+def pick_mac(macs, mac_type="controler"):
+    if len(macs) == 1:
         selected = 0
     else:
-        print('controlers are:')
-        for index, name in enumerate(controlers):
+        print('{} are:'.format(mac_type))
+        for index, name in enumerate(macs):
             print('{:3}\t{}'.format(index, name))
         selected = input(
-            'which controler you want to use? [{}-{}]:'.format(0, len(controlers) - 1))
-    print('using BT controler: {}'.format(controlers[selected]))
-    return controlers[selected]
+            'which {} you want to use? [{}-{}]:'.format(mac_type, 0, len(macs) - 1))
+        selected = int(selected, 10)
+    print('using BT {}: {}'.format(mac_type, macs[selected]))
+    return macs[selected]
+
+
+def to_local_mac(mac, pattern):
+    if not _mac_pattern.match(mac) and not _win_mac_pattern.match(mac) and not _win_disp_mac_pattern.match(mac):
+        raise Exception("Invalid maca address \"{}\"".format(mac))
+    mac = mac.replace(":", "")
+    mac = mac.replace("-", "")
+
+    if pattern == 'linux':  # linux
+        return "{}:{}:{}:{}:{}:{}".format(*[mac[i*2:i*2+2] for i in range(6)]).upper()
+    else:
+        return "{}-{}-{}-{}-{}-{}".format(*[mac[i*2:i*2+2] for i in range(6)]).lower()
 
 
 def linux(args):
@@ -34,16 +49,41 @@ def linux(args):
     if args.controler and args.controler in controler:
         controler = args.controler
     else:
-        controler = pick_controler(controler)
+        controler = pick_mac(controler)
     base_dir = os.path.join(base_dir, controler)
     devices = []
-    try:
-        for name in os.listdir(base_dir):
-            if _mac_pattern.match(name):
-                devices.append(name)
-    except PermissionError:
-        print('ERROR, you are lack of permission, try using sudo')
+    if not args.device:
+        try:
+            for name in os.listdir(base_dir):
+                if _mac_pattern.match(name):
+                    devices.append(name)
+        except PermissionError:
+            print('ERROR, you are lack of permission, try using sudo')
+            return
+
+    if args.update:  # update local config
+        device = to_local_mac(args.device, 'linux')
+        info_file = os.path.join(base_dir, device, 'info')
+        config = configparser.ConfigParser()
+        config.read(info_file)
+        print("device name: {}".format(config['General']['Name']))
+        lcfg = json.loads(sys.stdin.read())  # loaded config
+        print(lcfg)
+
+        if 'LinkKey' in lcfg:
+            config['LinkKey']['Key'] = lcfg['LinkKey']
+        else:
+            config['IdentityResolvingKey']['Key'] = lcfg['IRK']
+            config['LongTermKey']['Key'] = lcfg['LTK']
+            config['LongTermKey']['EDiv'] = str(lcfg['EDIV'])
+            config['LongTermKey']['Rand'] = str(lcfg['ERand'])
+            config['LocalSignatureKey']['Key'] = lcfg['CSRK']
+        with open(info_file, 'w') as configfile:
+            config.write(configfile)
+
         return
+
+    # output configs
     configs = {}
     print('paired devices are:')
     for index, device in enumerate(devices):
@@ -57,6 +97,7 @@ def linux(args):
             configs[device] = {
                 'IRK': config['IdentityResolvingKey']['Key'],
                 'LTK': config['LongTermKey']['Key'],
+                'CSRK': config['LocalSignatureKey']['Key'],
                 'EDIV': config['LongTermKey']['EDiv'],
                 'ERand': config['LongTermKey']['Rand']
             }
@@ -84,7 +125,7 @@ def windows(args):
     if args.controler and args.controler in controler:
         controler = args.controler
     else:
-        controler = pick_controler(controler)
+        controler = pick_mac(controler)
     keys.Close()
 
     # list devices in keys
@@ -134,10 +175,11 @@ def main():
     parser = argparse.ArgumentParser(description='Cross platform bluetooth pair tookit')
     parser.add_argument('--controler', type=str, default='',
                         help='bluetooth controler MAC address')
-    # parser.add_argument('--device', type=str, default='',
-    #                     help='bluetooth device MAC address')
+    parser.add_argument('--device', type=str, default='',
+                        help='bluetooth device MAC address')
     # parser.add_argument('-o', '--output', type=str,
     #                     default='', help='output file for device')
+    parser.add_argument('--update', action='store_true', help="import from stdin")
     args = parser.parse_args()
     if os.name == 'posix':  # linux
         linux(args)
